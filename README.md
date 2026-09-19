@@ -29,14 +29,14 @@
 ### 一键部署（推荐）
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/qyc1122/Hysteria2/main/一键部署Hysteria2.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Reina52/Hysteria2/main/一键部署Hysteria2.sh)
 ```
 
 ### 手动部署
 
 ```bash
 # 1. 下载脚本
-wget https://raw.githubusercontent.com/qyc1122/Hysteria2/main/一键部署Hysteria2.sh
+wget https://raw.githubusercontent.com/Reina52/Hysteria2/main/一键部署Hysteria2.sh
 
 # 2. 运行
 bash 一键部署Hysteria2.sh
@@ -60,7 +60,7 @@ bash 一键部署Hysteria2.sh
 
 1. **运行一键脚本**
    ```bash
-   bash <(curl -fsSL https://raw.githubusercontent.com/qyc1122/Hysteria2/main/一键部署Hysteria2.sh)
+   bash <(curl -fsSL https://raw.githubusercontent.com/Reina52/Hysteria2/main/一键部署Hysteria2.sh)
    ```
 
 2. **等待安装完成**（约 1-2 分钟）
@@ -201,7 +201,7 @@ MIT License
 
 - [Hysteria 官方文档](https://hysteria.network/)
 - [Hysteria GitHub](https://github.com/apernet/hysteria)
-- [问题反馈](https://github.com/qyc1122/Hysteria2/issues)
+- [问题反馈](https://github.com/Reina52/Hysteria2/issues)
 
 ## ⭐ Star History
 

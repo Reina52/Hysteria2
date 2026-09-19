@@ -44,8 +44,7 @@ fi
 echo -e "${BLUE}检测到系统: $OS $VERSION${NC}"
 echo ""
 
-# 生成随机密码和端口
-PASSWORD=$(openssl rand -base64 16 | tr -d '/+=' | cut -c1-20)
+# 生成端口
 PORT=443
 
 echo -e "${YELLOW}=========================================="
@@ -54,18 +53,48 @@ echo "==========================================${NC}"
 echo ""
 
 # 步骤 1: 安装依赖
-echo -e "${CYAN}[1/8] 安装系统依赖...${NC}"
+echo -e "${CYAN}[1/9] 安装系统依赖...${NC}"
 if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
     apt update -qq
-    apt install -y curl wget openssl qrencode > /dev/null 2>&1
+    apt install -y curl wget openssl qrencode iproute2 > /dev/null 2>&1
 elif [ "$OS" = "centos" ]; then
-    yum install -y curl wget openssl qrencode > /dev/null 2>&1
+    yum install -y curl wget openssl qrencode iproute > /dev/null 2>&1
 fi
 echo -e "${GREEN}✓ 依赖安装完成${NC}"
 echo ""
 
-# 步骤 2: 安装 Hysteria 2
-echo -e "${CYAN}[2/8] 安装 Hysteria 2...${NC}"
+# 步骤 2: 检测可用的 IPv4/IPv6 地址
+echo -e "${CYAN}[2/9] 检测 IPv4/IPv6 网络...${NC}"
+LOCAL_IPV4=""
+LOCAL_IPV6=""
+SERVER_IPV4=""
+SERVER_IPV6=""
+
+if command -v ip &> /dev/null; then
+    LOCAL_IPV4=$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4, address, "/"); print address[1]; exit}')
+    LOCAL_IPV6=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
+    [[ -z "$LOCAL_IPV6" ]] && LOCAL_IPV6=$(ip -6 -o addr show scope global 2>/dev/null | awk '{split($4, address, "/"); print address[1]; exit}')
+fi
+
+SERVER_IPV4=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
+SERVER_IPV6=$(curl -6 -fsS --max-time 5 https://api6.ipify.org 2>/dev/null || true)
+
+[[ -z "$SERVER_IPV4" ]] && SERVER_IPV4="$LOCAL_IPV4"
+[[ -z "$SERVER_IPV6" ]] && SERVER_IPV6="$LOCAL_IPV6"
+[[ -n "$SERVER_IPV6" && -z "$LOCAL_IPV6" ]] && SERVER_IPV6=""
+
+if [[ -z "$SERVER_IPV4" && -z "$SERVER_IPV6" ]]; then
+    echo -e "${RED}错误: 未检测到可用的 IPv4 或 IPv6 地址${NC}"
+    exit 1
+fi
+
+echo -e "${CYAN}检测到网络地址:${NC}"
+[[ -n "$SERVER_IPV4" ]] && echo -e "${GREEN}✓ IPv4: $SERVER_IPV4${NC}"
+[[ -n "$SERVER_IPV6" ]] && echo -e "${GREEN}✓ IPv6: $SERVER_IPV6${NC}"
+echo ""
+
+# 步骤 3: 安装 Hysteria 2
+echo -e "${CYAN}[3/9] 安装 Hysteria 2...${NC}"
 bash <(curl -fsSL https://get.hy2.sh/) > /dev/null 2>&1
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Hysteria 2 安装成功${NC}"
@@ -75,8 +104,8 @@ else
 fi
 echo ""
 
-# 步骤 3: 生成证书
-echo -e "${CYAN}[3/8] 生成 TLS 证书...${NC}"
+# 步骤 4: 生成证书
+echo -e "${CYAN}[4/9] 生成 TLS 证书...${NC}"
 mkdir -p /etc/hysteria
 openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
   -keyout /etc/hysteria/server.key \
@@ -86,10 +115,16 @@ openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
 echo -e "${GREEN}✓ 证书生成完成${NC}"
 echo ""
 
-# 步骤 4: 创建优化配置
-echo -e "${CYAN}[4/8] 创建优化配置文件...${NC}"
-cat > /etc/hysteria/config.yaml <<EOF
-listen: :$PORT
+# 步骤 5: 创建 IPv4/IPv6 配置和服务
+echo -e "${CYAN}[5/9] 创建 IPv4/IPv6 配置和服务...${NC}"
+
+create_instance() {
+    local instance="$1"
+    local listen="$2"
+    local password="$3"
+
+    cat > "/etc/hysteria/config-${instance}.yaml" <<EOF
+listen: ${listen}
 
 tls:
   cert: /etc/hysteria/server.crt
@@ -97,7 +132,7 @@ tls:
 
 auth:
   type: password
-  password: $PASSWORD
+  password: ${password}
 
 masquerade:
   type: proxy
@@ -118,21 +153,62 @@ bandwidth:
   up: 1 gbps
   down: 1 gbps
 
-ignoreClientBandwidth: false
+ignoreClientBandwidth: true
 speedTest: false
 disableUDP: false
 udpIdleTimeout: 60s
 EOF
 
+    cat > "/etc/systemd/system/hysteria-server-${instance}.service" <<EOF
+[Unit]
+Description=Hysteria Server (${instance})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hysteria server --config /etc/hysteria/config-${instance}.yaml
+WorkingDirectory=/var/lib/hysteria
+User=hysteria
+Group=hysteria
+Environment=HYSTERIA_LOG_LEVEL=info
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    chown hysteria:hysteria "/etc/hysteria/config-${instance}.yaml"
+    chmod 600 "/etc/hysteria/config-${instance}.yaml"
+}
+
+PASSWORD_IPV4=""
+PASSWORD_IPV6=""
+
+if [[ -n "$SERVER_IPV4" ]]; then
+    PASSWORD_IPV4=$(openssl rand -base64 16 | tr -d '/+=' | cut -c1-20)
+    create_instance "ipv4" "0.0.0.0:${PORT}" "$PASSWORD_IPV4"
+fi
+
+if [[ -n "$SERVER_IPV6" ]]; then
+    PASSWORD_IPV6=$(openssl rand -base64 16 | tr -d '/+=' | cut -c1-20)
+    create_instance "ipv6" "[${LOCAL_IPV6}]:${PORT}" "$PASSWORD_IPV6"
+fi
+
+systemctl disable --now hysteria-server.service hysteria-server-ipv4.service hysteria-server-ipv6.service > /dev/null 2>&1 || true
+systemctl daemon-reload
 chown hysteria:hysteria /etc/hysteria/server.key
 chown hysteria:hysteria /etc/hysteria/server.crt
-chown hysteria:hysteria /etc/hysteria/config.yaml
 chmod 600 /etc/hysteria/server.key
-echo -e "${GREEN}✓ 配置文件创建完成${NC}"
+echo -e "${GREEN}✓ IPv4/IPv6 配置文件和服务创建完成${NC}"
 echo ""
 
-# 步骤 5: 系统优化
-echo -e "${CYAN}[5/8] 优化系统参数...${NC}"
+# 步骤 6: 系统优化
+echo -e "${CYAN}[6/9] 优化系统参数...${NC}"
 
 # 开启 BBR
 if ! sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
@@ -175,8 +251,8 @@ EOF
 echo -e "${GREEN}✓ 系统优化完成${NC}"
 echo ""
 
-# 步骤 6: 配置防火墙
-echo -e "${CYAN}[6/8] 配置防火墙...${NC}"
+# 步骤 7: 配置防火墙
+echo -e "${CYAN}[7/9] 配置防火墙...${NC}"
 if command -v ufw &> /dev/null; then
     ufw allow $PORT/udp > /dev/null 2>&1
     echo -e "${GREEN}✓ UFW 防火墙已配置${NC}"
@@ -192,40 +268,51 @@ else
 fi
 echo ""
 
-# 步骤 7: 启动服务
-echo -e "${CYAN}[7/8] 启动 Hysteria 服务...${NC}"
+# 步骤 8: 启动服务
+echo -e "${CYAN}[8/9] 启动 Hysteria 服务...${NC}"
 systemctl daemon-reload
-systemctl enable hysteria-server > /dev/null 2>&1
-systemctl restart hysteria-server
-sleep 2
+SERVICES_STARTED=0
+SERVICES_FAILED=0
 
-if systemctl is-active --quiet hysteria-server; then
-    echo -e "${GREEN}✓ 服务启动成功${NC}"
-else
-    echo -e "${RED}✗ 服务启动失败，查看日志:${NC}"
-    journalctl -u hysteria-server -n 20 --no-pager
+start_instance() {
+    local instance="$1"
+    local service="hysteria-server-${instance}"
+
+    systemctl enable "$service" > /dev/null 2>&1
+    systemctl restart "$service"
+    sleep 1
+
+    if systemctl is-active --quiet "$service"; then
+        echo -e "${GREEN}✓ $instance 服务启动成功${NC}"
+        SERVICES_STARTED=$((SERVICES_STARTED + 1))
+    else
+        SERVICES_FAILED=$((SERVICES_FAILED + 1))
+        echo -e "${RED}✗ $instance 服务启动失败，查看日志: journalctl -u $service -n 20 --no-pager${NC}"
+        journalctl -u "$service" -n 20 --no-pager
+    fi
+}
+
+[[ -n "$SERVER_IPV4" ]] && start_instance "ipv4"
+[[ -n "$SERVER_IPV6" ]] && start_instance "ipv6"
+
+if [ "$SERVICES_STARTED" -eq 0 ] || [ "$SERVICES_FAILED" -gt 0 ]; then
+    echo -e "${RED}✗ 至少一个 Hysteria 服务启动失败，请检查上面的日志${NC}"
     exit 1
 fi
 echo ""
 
-# 步骤 8: 生成客户端配置
-echo -e "${CYAN}[8/8] 生成客户端配置...${NC}"
+# 步骤 9: 生成客户端配置
+echo -e "${CYAN}[9/9] 生成客户端配置...${NC}"
 
-# 获取服务器 IP
-SERVER_IP=$(curl -s ip.sb || curl -s ifconfig.me || curl -s icanhazip.com)
+write_client_config() {
+    local instance="$1"
+    local address="$2"
+    local password="$3"
 
-if [ -z "$SERVER_IP" ]; then
-    SERVER_IP="YOUR_SERVER_IP"
-fi
+    cat > "/root/hysteria-client-${instance}.yaml" <<EOF
+server: ${address}:${PORT}
 
-# 生成分享链接
-SHARE_LINK="hysteria2://$PASSWORD@$SERVER_IP:$PORT/?insecure=1&sni=www.bing.com#Hysteria2"
-
-# 保存客户端配置
-cat > /root/hysteria-client.yaml <<EOF
-server: $SERVER_IP:$PORT
-
-auth: $PASSWORD
+auth: ${password}
 
 tls:
   sni: www.bing.com
@@ -244,6 +331,17 @@ socks5:
 http:
   listen: 127.0.0.1:8080
 EOF
+}
+
+if [[ -n "$SERVER_IPV4" ]]; then
+    SHARE_LINK_IPV4="hysteria2://$PASSWORD_IPV4@$SERVER_IPV4:$PORT/?insecure=1&sni=www.bing.com#Hysteria2-IPv4"
+    write_client_config "ipv4" "$SERVER_IPV4" "$PASSWORD_IPV4"
+fi
+
+if [[ -n "$SERVER_IPV6" ]]; then
+    SHARE_LINK_IPV6="hysteria2://$PASSWORD_IPV6@[$SERVER_IPV6]:$PORT/?insecure=1&sni=www.bing.com#Hysteria2-IPv6"
+    write_client_config "ipv6" "[$SERVER_IPV6]" "$PASSWORD_IPV6"
+fi
 
 echo -e "${GREEN}✓ 客户端配置已生成${NC}"
 echo ""
@@ -263,24 +361,38 @@ echo -e "${NC}"
 echo -e "${CYAN}=========================================="
 echo "  服务器信息"
 echo "==========================================${NC}"
-echo -e "${YELLOW}服务器地址:${NC} $SERVER_IP"
-echo -e "${YELLOW}端口:${NC} $PORT"
-echo -e "${YELLOW}密码:${NC} $PASSWORD"
-echo -e "${YELLOW}协议:${NC} UDP"
-echo ""
+print_instance_result() {
+    local label="$1"
+    local instance="${label,,}"
+    local address="$2"
+    local password="$3"
+    local link="$4"
 
-echo -e "${CYAN}=========================================="
-echo "  分享链接"
-echo "==========================================${NC}"
-echo -e "${GREEN}$SHARE_LINK${NC}"
-echo ""
+    echo -e "${CYAN}=========================================="
+    echo "  $label"
+    echo "==========================================${NC}"
+    echo -e "${YELLOW}服务器地址:${NC} $address"
+    echo -e "${YELLOW}端口:${NC} $PORT"
+    echo -e "${YELLOW}密码:${NC} $password"
+    echo -e "${YELLOW}协议:${NC} UDP"
+    echo -e "${YELLOW}服务:${NC} hysteria-server-$instance"
+    echo -e "${YELLOW}客户端配置:${NC} /root/hysteria-client-$instance.yaml"
+    echo ""
+    echo -e "${YELLOW}分享链接:${NC}"
+    echo -e "${GREEN}$link${NC}"
+    echo ""
+    echo -e "${YELLOW}二维码（手机扫描）:${NC}"
+    qrencode -t ANSIUTF8 "$link"
+    echo ""
+}
 
-# 生成二维码
-echo -e "${CYAN}=========================================="
-echo "  二维码（手机扫描）"
-echo "==========================================${NC}"
-qrencode -t ANSIUTF8 "$SHARE_LINK"
-echo ""
+if [[ -n "$SERVER_IPV4" ]]; then
+    print_instance_result "IPv4" "$SERVER_IPV4" "$PASSWORD_IPV4" "$SHARE_LINK_IPV4"
+fi
+
+if [[ -n "$SERVER_IPV6" ]]; then
+    print_instance_result "IPv6" "[$SERVER_IPV6]" "$PASSWORD_IPV6" "$SHARE_LINK_IPV6"
+fi
 
 echo -e "${CYAN}=========================================="
 echo "  客户端下载"
@@ -298,18 +410,21 @@ echo ""
 echo -e "${CYAN}=========================================="
 echo "  配置文件位置"
 echo "==========================================${NC}"
-echo -e "${YELLOW}服务器配置:${NC} /etc/hysteria/config.yaml"
-echo -e "${YELLOW}客户端配置:${NC} /root/hysteria-client.yaml"
+echo -e "${YELLOW}IPv4 服务器配置:${NC} /etc/hysteria/config-ipv4.yaml"
+echo -e "${YELLOW}IPv6 服务器配置:${NC} /etc/hysteria/config-ipv6.yaml"
+echo -e "${YELLOW}IPv4 客户端配置:${NC} /root/hysteria-client-ipv4.yaml"
+echo -e "${YELLOW}IPv6 客户端配置:${NC} /root/hysteria-client-ipv6.yaml"
 echo ""
 
 echo -e "${CYAN}=========================================="
 echo "  管理命令"
 echo "==========================================${NC}"
-echo -e "${YELLOW}启动服务:${NC} systemctl start hysteria-server"
-echo -e "${YELLOW}停止服务:${NC} systemctl stop hysteria-server"
-echo -e "${YELLOW}重启服务:${NC} systemctl restart hysteria-server"
-echo -e "${YELLOW}查看状态:${NC} systemctl status hysteria-server"
-echo -e "${YELLOW}查看日志:${NC} journalctl -u hysteria-server -f"
+echo -e "${YELLOW}启动 IPv4:${NC} systemctl start hysteria-server-ipv4"
+echo -e "${YELLOW}启动 IPv6:${NC} systemctl start hysteria-server-ipv6"
+echo -e "${YELLOW}停止服务:${NC} systemctl stop hysteria-server-ipv4 hysteria-server-ipv6"
+echo -e "${YELLOW}重启服务:${NC} systemctl restart hysteria-server-ipv4 hysteria-server-ipv6"
+echo -e "${YELLOW}查看状态:${NC} systemctl status hysteria-server-ipv4 hysteria-server-ipv6"
+echo -e "${YELLOW}查看日志:${NC} journalctl -u hysteria-server-ipv4 -u hysteria-server-ipv6 -f"
 echo ""
 
 echo -e "${CYAN}=========================================="
@@ -332,10 +447,11 @@ else
     echo -e "${YELLOW}⚠${NC} BBR: 未启用"
 fi
 
-if systemctl is-active --quiet hysteria-server; then
-    echo -e "${GREEN}✓${NC} 服务状态: 运行中"
-else
-    echo -e "${RED}✗${NC} 服务状态: 未运行"
+if [[ -n "$SERVER_IPV4" ]]; then
+    systemctl is-active --quiet hysteria-server-ipv4 && echo -e "${GREEN}✓${NC} IPv4 服务状态: 运行中" || echo -e "${RED}✗${NC} IPv4 服务状态: 未运行"
+fi
+if [[ -n "$SERVER_IPV6" ]]; then
+    systemctl is-active --quiet hysteria-server-ipv6 && echo -e "${GREEN}✓${NC} IPv6 服务状态: 运行中" || echo -e "${RED}✗${NC} IPv6 服务状态: 未运行"
 fi
 echo ""
 
@@ -351,9 +467,10 @@ echo -e "${PURPLE}=========================================="
 echo "  建议"
 echo "==========================================${NC}"
 echo "• 定期更新: bash <(curl -fsSL https://get.hy2.sh/)"
-echo "• 修改密码: 编辑 /etc/hysteria/config.yaml"
-echo "• 备份配置: cp /etc/hysteria/config.yaml ~/config.yaml.bak"
-echo "• 监控日志: journalctl -u hysteria-server -f"
+echo "• 修改 IPv4 密码: 编辑 /etc/hysteria/config-ipv4.yaml"
+echo "• 修改 IPv6 密码: 编辑 /etc/hysteria/config-ipv6.yaml"
+echo "• 备份配置: cp /etc/hysteria/config-ipv4.yaml ~/config-ipv4.yaml.bak"
+echo "• 监控日志: journalctl -u hysteria-server-ipv4 -u hysteria-server-ipv6 -f"
 echo ""
 
 echo -e "${GREEN}=========================================="
@@ -367,21 +484,28 @@ cat > /root/hysteria-info.txt <<EOF
 Hysteria 2 配置信息
 ========================================
 
-服务器: $SERVER_IP:$PORT
-密码: $PASSWORD
+ignoreClientBandwidth: true
 
-分享链接:
-$SHARE_LINK
+IPv4 服务器: ${SERVER_IPV4:-未检测到}:$PORT
+IPv4 密码: ${PASSWORD_IPV4:-未部署}
+IPv4 分享链接:
+${SHARE_LINK_IPV4:-未部署}
 
-客户端配置文件: /root/hysteria-client.yaml
-服务器配置文件: /etc/hysteria/config.yaml
+IPv6 服务器: ${SERVER_IPV6:-未检测到}:$PORT
+IPv6 密码: ${PASSWORD_IPV6:-未部署}
+IPv6 分享链接:
+${SHARE_LINK_IPV6:-未部署}
+
+IPv4 客户端配置文件: /root/hysteria-client-ipv4.yaml
+IPv6 客户端配置文件: /root/hysteria-client-ipv6.yaml
+IPv4 服务器配置文件: /etc/hysteria/config-ipv4.yaml
+IPv6 服务器配置文件: /etc/hysteria/config-ipv6.yaml
 
 管理命令:
-systemctl start hysteria-server    # 启动
-systemctl stop hysteria-server     # 停止
-systemctl restart hysteria-server  # 重启
-systemctl status hysteria-server   # 状态
-journalctl -u hysteria-server -f   # 日志
+systemctl start hysteria-server-ipv4    # 启动 IPv4
+systemctl start hysteria-server-ipv6    # 启动 IPv6
+systemctl status hysteria-server-ipv4 hysteria-server-ipv6
+journalctl -u hysteria-server-ipv4 -u hysteria-server-ipv6 -f
 
 安装时间: $(date)
 ========================================

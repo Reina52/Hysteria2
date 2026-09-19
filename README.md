@@ -13,6 +13,8 @@
 - 🔧 **一键部署** - 3 分钟完成所有配置
 - 📱 **全平台** - 支持 Windows/Mac/Linux/Android/iOS
 - 🔒 **安全可靠** - TLS 加密 + 伪装技术
+- 🌐 **双栈部署** - 自动检测 IPv4/IPv6，分别部署并输出连接信息
+- 📶 **带宽兼容** - 默认开启 `ignoreClientBandwidth`
 
 ## 📊 性能对比
 
@@ -71,6 +73,13 @@ bash 一键部署Hysteria2.sh
 
 ### 客户端配置
 
+脚本会自动检测服务器是否有 IPv4 和 IPv6：
+
+- 检测到 IPv4 时，部署 `hysteria-server-ipv4` 并输出 IPv4 分享链接
+- 检测到 IPv6 时，部署 `hysteria-server-ipv6` 并输出 IPv6 分享链接
+- 两种地址都存在时，两个实例使用同一个 UDP 端口、独立密码和独立配置
+- 服务端默认开启 `ignoreClientBandwidth: true`
+
 #### 方法一：使用分享链接（推荐）
 
 复制安装完成后显示的分享链接，在客户端中导入。
@@ -87,27 +96,29 @@ bash 一键部署Hysteria2.sh
 
 ```bash
 # 查看状态
-systemctl status hysteria-server
+systemctl status hysteria-server-ipv4 hysteria-server-ipv6
 
 # 启动服务
-systemctl start hysteria-server
+systemctl start hysteria-server-ipv4
+systemctl start hysteria-server-ipv6
 
 # 停止服务
-systemctl stop hysteria-server
+systemctl stop hysteria-server-ipv4 hysteria-server-ipv6
 
 # 重启服务
-systemctl restart hysteria-server
+systemctl restart hysteria-server-ipv4 hysteria-server-ipv6
 
 # 查看日志
-journalctl -u hysteria-server -f
+journalctl -u hysteria-server-ipv4 -u hysteria-server-ipv6 -f
 
 # 查看配置
-cat /etc/hysteria/config.yaml
+cat /etc/hysteria/config-ipv4.yaml
+cat /etc/hysteria/config-ipv6.yaml
 ```
 
 ## 📁 项目文件
 
-- `一键部署Hysteria2.sh` - 完整的自动化部署脚本（包含所有优化）
+- `一键部署Hysteria2.sh` - 完整的自动化部署脚本（包含双栈检测和所有优化）
 - `README.md` - 项目说明文档
 
 ## ⚡ 性能优化
